@@ -503,9 +503,13 @@ kernel result.
 ### 4.3 Quantized and Sparse Attention with TRTLLM Attn Backend
 
 On datacenter Blackwell GPUs, MiniMax H3 uses dense BF16 `TRTLLM_ATTN` by
-default. The backend also supports two optional lossy acceleration modes:
-[SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
-and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax).
+default. The backend also supports two optional lossy acceleration modes. SAGE
+quantizes both the QK and PV paths to FP8. Skip-Softmax uses the QK result to
+dynamically skip unnecessary Softmax and PV computation. We evaluate a
+conservative Skip-Softmax configuration that largely preserves the generated
+video's visual quality. See the [SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
+and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax)
+documentation for configuration details.
 
 | Attention policy | SAGE config | Skip-Softmax config | Model execution | Speedup | LPIPS vs. dense | Sample |
 |---|---|---|---:|---:|---:|---|
