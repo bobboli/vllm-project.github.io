@@ -285,9 +285,11 @@ For the canonical workload, 58,758 valid tokens occupy a 58,816-token aligned
 buffer, and Ulysses distributes that sequence across eight GPUs. vLLM-Omni
 reduces unnecessary work at three boundaries:
 
-- **Packed attention ([PR #5779](https://github.com/vllm-project/vllm-omni/pull/5779)).**
-  Valid sequence lengths are passed to `TRTLLM_ATTN`, and structural suffix
-  padding is removed before dense or quantized attention.
+- **TRTLLM attention and packed sequences ([PR #5283](https://github.com/vllm-project/vllm-omni/pull/5283),
+  [PR #5779](https://github.com/vllm-project/vllm-omni/pull/5779)).**
+  `TRTLLM_ATTN` is the default attention backend for MiniMax H3 on datacenter
+  Blackwell GPUs. Valid sequence lengths are passed to the backend, and
+  structural suffix padding is removed before attention.
 - **Rank-local model boundaries ([PR #6173](https://github.com/vllm-project/vllm-omni/pull/6173)).**
   Each rank constructs only its own embedding and RoPE rows. After the
   transformer, the compact 128-channel projection is gathered instead of the
