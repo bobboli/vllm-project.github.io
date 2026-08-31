@@ -387,25 +387,32 @@ rather than attributing transport or CPU gains to the DiT.
 
 ### 3.5 Diffusers versus vLLM-Omni A/B
 
-The post compares Diffusers and vLLM-Omni on the same B300 GPU budget and
-complete-MP4 boundary. If placement differs, label the result a deployment
-comparison rather than an unqualified engine speedup.
+Both runtimes use eight B300 GPUs, the same prompt and seed, 50 sigma points,
+and the same complete-MP4 timing boundary. Diffusers keeps one resident
+`ModularPipeline`, replicates the weights across eight ranks, and uses native
+context parallelism with Ulysses8, Ring1, and dense BF16 attention. vLLM-Omni
+uses encoder TP1, DiT USP8 with Ring1 and Fast Ulysses, VAE PP8 tile decode, and
+dense `TRTLLM_ATTN`.
+
+vLLM-Omni completes the request in 58.371 seconds versus 82.239 seconds for
+Diffusers: 29.0% lower latency, or a 1.409× complete-response speedup.
 
 Before using pixelwise or waveform metrics across runtimes, verify that both
 implementations consume the same generator state, draw order, latent shapes,
 and scheduler grid. If that contract differs, report matched-prompt perceptual
 and semantic quality instead of presenting SSIM/PSNR as numerical parity.
 
-| B300 runtime | Devices / placement / dense attention | Ready time | Encoder | Denoise total / 49 / per-forward | Video/audio VAE | Transport + MP4 | Complete E2E | Peak HBM / host RAM | Quality / artifacts |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| Diffusers | 8× B300; resident `ModularPipeline`; replicated weights; Ulysses8, Ring1; dense BF16 | 30.895 s | Not isolated | Not isolated / 49 / not isolated | Not isolated | Not isolated | 82.239 s median; 80.702–84.572 s; CV 1.72% | 151.699 GiB peak rank / not recorded | Coherent 243-frame H.264/AAC output |
-| vLLM-Omni | 8× B300; encoder TP1; DiT DP1 × TP1 × USP8, Ring1 with Fast Ulysses; VAE PP8 tile; dense `TRTLLM_ATTN` | 168 s | 0.057 s | 51.800 s / 49 / 1.057 s | 0.952 s / 0.055 s | 1.528 s MP4 encode and mux | 58.371 s median; 58.259–58.484 s | 128.232 GiB peak rank / not recorded | Coherent 243-frame H.264/AAC output |
+| B300 runtime | Prompt encode | DiT denoise | Video / audio VAE | MP4 encode + mux | Client E2E | Peak reserved HBM | Output |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Diffusers | — | — | — | — | **82.239 s** median; 80.702–84.572 s; CV 1.72% | 151.699 GiB, peak rank | Coherent 243-frame H.264/AAC |
+| vLLM-Omni | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **58.371 s** median; 58.259–58.484 s | 128.232 GiB, peak rank | Coherent 243-frame H.264/AAC |
 
-Both runtimes use the same prompt, seed, output shape, schedule, and eight-GPU
-budget. Generator draw-order parity is not established, so the comparison makes
-no pixelwise claim. vLLM-Omni is 1.409× faster by complete-response median.
-The raw commands, manifests, samples, logs, and generated media are retained
-outside the blog repository.
+Diffusers phase timings were not isolated. The vLLM-Omni phase values come from
+a separate diagnostic request and are nested measurements rather than terms to
+sum into E2E. Startup readiness is omitted because the two runs did not use a
+comparable startup boundary. Generator draw-order parity is not established,
+so the comparison makes no pixelwise claim. The raw commands, manifests,
+samples, logs, and generated media are retained outside the blog repository.
 
 ## 4. Acceleration paths with explicit quality or precision trade-offs
 
