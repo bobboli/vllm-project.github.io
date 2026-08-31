@@ -13,12 +13,6 @@ tags:
 published: false
 ---
 
-> [!NOTE]
-> This is an unpublished draft. The architecture and feature descriptions are
-> linked to their implementation sources, while the B300 benchmark and quality
-> fields intentionally remain `TBD` until collaborators provide final,
-> reproducible validation data.
-
 MiniMax H3 is a joint video-and-audio diffusion model: one request can combine
 text, images, videos, and audio references, then return an MP4 containing H.264
 video and synchronized stereo audio. That capability also makes production
@@ -118,12 +112,12 @@ tuning:
 | Base schedule | 50 requested sigma points and 49 expected DiT forwards; record both |
 | Prompt | The official MiniMax H3 model-card `case-T2VA` H3-Context-IR output, frozen at model revision `42ed227e`; SHA-256 `98f36b879692095e099ae824c18d9e93e7006a490e082fd474a5f531769dcf06` |
 | Seed | `0`, matching the official H3-Base script |
-| vLLM-Omni | vLLM-Omni with vLLM `v0.28.0`; dense BF16 and Fast Ulysses |
+| vLLM-Omni | [`main@b81aeb7`](https://github.com/vllm-project/vllm-omni/commit/b81aeb7b86837f6fe8956f3aef83798ad26c5a26) with vLLM `v0.28.0`; dense BF16 and Fast Ulysses |
 | Diffusers lane | Diffusers `v0.40.0`, PyTorch `2.13.0+cu130`, and Transformers `5.14.1`; eight replicated-weight ranks with native context parallelism, Ulysses8, and Ring1 |
 | Model | [MiniMax H3 `42ed227e`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe) |
 | Repetitions | One full-shape feasibility request, also recorded as the excluded compile/kernel warmup, then at least two measured repetitions per claimed A/B; the B300 Diffusers run uses five |
 | Output checks | HTTP/process success; full H.264/AAC decode; 1344×768, exactly 243 frames at 24 FPS; 32 kHz stereo audio; nonzero frame variance and audio RMS; prompt-adherence review |
-| Raw evidence | Retained by each benchmark contributor outside the blog repository |
+| Evidence | Representative MP4 outputs are included in this article and linked from the result tables |
 
 The canonical prompt is the 380-word structured output shown in the official
 [MiniMax H3 `case-T2VA`](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/README.md#case-t2va):
@@ -477,7 +471,7 @@ documentation for configuration details.
 | Attention policy | SAGE config | Skip-Softmax config | Model execution | Speedup | LPIPS vs. dense | Sample |
 |---|---|---|---:|---:|---:|---|
 | Dense TRTLLM | Off | Off | 54.246 s | 1.000× | 0 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
-| SAGE FP8 | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=4` | Off | 46.592 s | **1.164×** | 0.4093 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
+| SAGE FP8 | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=4` | Off | 46.592 s | **1.164×** | 0.4093 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8.mp4) |
 | Skip-Softmax | Off | `threshold=0.05`, `disabled_until_timestep=0.97` | 50.029 s | **1.084×** | 0.0917 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
 | SAGE FP8 + Skip-Softmax | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=4` | `threshold=0.05`, `disabled_until_timestep=0.97` | 46.073 s | **1.177×** | 0.4103 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
 
