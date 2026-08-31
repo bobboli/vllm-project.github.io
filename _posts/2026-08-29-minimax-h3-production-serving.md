@@ -118,12 +118,12 @@ tuning:
 | Base schedule | 50 requested sigma points and 49 expected DiT forwards; record both |
 | Prompt | The official MiniMax H3 model-card `case-T2VA` H3-Context-IR output, frozen at model revision `42ed227e`; SHA-256 `98f36b879692095e099ae824c18d9e93e7006a490e082fd474a5f531769dcf06` |
 | Seed | `0`, matching the official H3-Base script |
-| vLLM-Omni | Pin every B300 test to [`86b85c07`](https://github.com/vllm-project/vllm-omni/commit/86b85c078bc041e04aee4c4d9167fb10fb1994c7), the merged commit for FastH3 [#6714](https://github.com/vllm-project/vllm-omni/pull/6714). It descends from [`759aa4ff`](https://github.com/vllm-project/vllm-omni/commit/759aa4ffebefa4b293eed6068115da823fa4fb7a), so it includes the merged [#6776](https://github.com/vllm-project/vllm-omni/pull/6776) and [#6824](https://github.com/vllm-project/vllm-omni/pull/6824) output path. Keep [vLLM `v0.28.0` / `2cf0a691`](https://github.com/vllm-project/vllm/commit/2cf0a6915ce544dc493a0990f2ea38d81601128a) and base image `sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14` fixed |
-| Diffusers lane | [Diffusers `v0.40.0` / `d035dcd7`](https://github.com/huggingface/diffusers/commit/d035dcd7cc7c88e0a154609b62887d50bba9fdc2); record Transformers, PyTorch, attention-kernel, and media-package versions |
+| vLLM-Omni | vLLM-Omni with vLLM `v0.28.0`; dense BF16 and Fast Ulysses |
+| Diffusers lane | Diffusers `v0.40.0`, PyTorch `2.13.0+cu130`, and Transformers `5.14.1`; eight replicated-weight ranks with native context parallelism, Ulysses8, and Ring1 |
 | Model | [MiniMax H3 `42ed227e`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe) |
-| Repetitions | One full-shape feasibility request, also recorded as the excluded compile/kernel warmup, then two measured repetitions per claimed A/B |
+| Repetitions | One full-shape feasibility request, also recorded as the excluded compile/kernel warmup, then at least two measured repetitions per claimed A/B; the B300 Diffusers run uses five |
 | Output checks | HTTP/process success; full H.264/AAC decode; 1344×768, exactly 243 frames at 24 FPS; 32 kHz stereo audio; nonzero frame variance and audio RMS; prompt-adherence review |
-| Artifact root | `vllm-omni-cookbook/blog/assets/figures/minimax-h3-production-serving/evidence/2026-08-29-<platform>/` |
+| Raw evidence | Retained by each benchmark contributor outside the blog repository |
 
 The canonical prompt is the 380-word structured output shown in the official
 [MiniMax H3 `case-T2VA`](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/README.md#case-t2va):
@@ -150,39 +150,94 @@ fallback stops the profile before repeated measurement. Tail latency requires
 a separately declared arrival process and enough samples; it is never inferred
 from the two single-request repetitions.
 
-### 2.2 Required stage accounting and parallelism
+### 2.2 Measurement methodology
 
-Use one end-to-end identity for every runtime:
+The cross-runtime headline is client-visible latency: synchronous request
+submission through receipt of the complete MP4. Model download, checkpoint
+conversion, compilation, startup, and warmup remain outside that interval.
+Diffusers reports this E2E value only.
 
-`T_client = T_queue + T_encoder + T_denoise + T_video_VAE + T_audio_VAE + T_transport + T_MP4 + T_residual`
+For diagnosis, vLLM-Omni exposes a hierarchy of native timing boundaries:
 
-Diffusers timing begins immediately before the frozen prompt enters the local
-pipeline and ends after the complete MP4 is written. vLLM-Omni timing begins at
-request submission and ends after the complete response body is received.
-Model download, checkpoint conversion, compilation, and warmup stay outside
-both warmed request intervals and are reported separately.
-
-| Stage | Required timing | Required placement and configuration |
+| Source label used below | Corresponding object | Scope |
 |---|---|---|
-| Encoder | Preparation and encoder wall time; for disaggregation, Stage 0 compute and handoff wait separately | Device IDs, TP, replicas, offload, prefix-cache state, attention backend |
-| DiT denoise | Total wall time, sigma points, actual forwards, and wall time per actual forward | Device IDs and group membership; TP, Ulysses, Ring, DP, CFG, PP/HSDP; regular or SymmMem Ulysses transport; DLO mode/resident layers; dense or approximate attention; eager/compile |
-| Video VAE | Decode wall time and multi-rank critical path | Devices, VAE patch-parallel size, mode, tiling, process group, kernel path |
-| Audio VAE | Separate wall time when instrumentation permits | Devices and rank-local, replicated, or sharded placement |
-| Transport | D2H, worker-to-engine, and inter-stage handoff where applicable; record payload bytes before and after preparation | Source/destination ranks, SHM/IPC path, payload dtype, shape, layout, and size |
-| CPU MP4 | Encode/mux wall time, process CPU time, and peak RSS | CPU model, NUMA affinity, threads, conversion path, PyAV/FFmpeg and codec settings |
-| Client E2E | Prompt submission through complete MP4 | Endpoint/call boundary, client host, concurrency, and network boundary |
-| Residual | `client E2E - directly measured stages` | Explain any material signed residual rather than hiding it in another stage |
+| `client` | `curl` | The external HTTP request, through receipt of the complete MP4 |
+| `request` | `RequestE2EStats` | One generation handled by the orchestrator; it may traverse one or more stages |
+| `stage` | `StageRequestStats` | One independently scheduled execution unit with its own engine, workers, and device group |
+| `engine` | `StageRequestStats.diffusion_metrics` | Request admission, execution, asynchronous output readiness, and output formatting inside a diffusion stage |
+| `profiler` | `DiffusionPipelineProfiler` | Selected `MiniMaxH3Pipeline` method boundaries: prompt encode, denoise, and VAE decode |
+| `server` | HTTP server timer | MP4 encode and mux after the final stage |
 
-For denoising, divide by the **actual DiT forward count**, not the requested
-sigma-point count. If only aggregate VAE timing exists, label it aggregate.
-Likewise, CPU MP4 excludes D2H and IPC unless the instrumentation boundary
-explicitly includes them.
+The standard MiniMax H3 profile has one diffusion stage. Prompt encoding, DiT
+denoising, and both VAE decoders are model operations inside that stage.
 
-Each result also carries this compact manifest:
+```text
+Timing boundary                                      Measurement
+Client request: complete-response E2E                client: time_total
+├─ Orchestrator request                              request: e2e_total_ms
+│  ├─ Queue before stage dispatch                    stage: pipeline_timings.queue_wait_ms
+│  └─ Diffusion stage: MiniMax H3 generation         stage: stage_gen_time_ms
+│     ├─ Diffusion engine: execution                 engine: diffusion_engine_exec_time_s
+│     │  ├─ Scheduler queue                          engine: scheduler_queue_wait_s
+│     │  ├─ Model operation: prompt encode           profiler: encode_prompt
+│     │  ├─ Model operation: DiT denoise loop        profiler: diffuse
+│     │  ├─ Model operation: Video VAE decode        profiler: video_vae.decode_latent
+│     │  └─ Model operation: Audio VAE decode        profiler: audio_vae.decode_latent
+│     ├─ Diffusion engine: output-ready wait         engine: output_ready_wait_time_s
+│     └─ Diffusion engine: output formatting         engine: postprocess_time_s
+└─ HTTP response
+   ├─ MP4 encode and mux                             server: Video response encoding (MP4 bytes)
+   └─ Response delivery                              client: included only in time_total
+```
+
+These measurements are nested. `stage_gen_time_ms` contains the diffusion
+engine work, and `diffusion_engine_exec_time_s` contains the model operations,
+so parent and child values are never added together. Divide the `diffuse` time
+by the observed DiT-forward count for the per-forward value.
+
+Each result also carries this compact placement manifest:
 
 | Profile | Encoder | DiT | Video/audio VAE | Output |
 |---|---|---|---|---|
 | TBD | Devices + TP/replicas/cache | Devices + TP/USP/Ring/DP/CFG/PP + offload/backend | Devices + VAE PP/mode/tiling + audio placement | Transport + CPU affinity/threads + mux path |
+
+#### Reproducing the vLLM-Omni measurements
+
+The server remains resident for one excluded full-shape warmup and the measured
+requests. The external client boundary is:
+
+```bash
+curl -sS -o output.mp4 \
+  -w 'client_e2e_s=%{time_total}\n' \
+  -X POST "http://127.0.0.1:${PORT}/v1/videos/sync" \
+  -F "prompt=<${PROMPT_FILE}" \
+  -F 'width=1344' -F 'height=768' -F 'fps=24' \
+  -F 'num_inference_steps=50' -F 'seed=0' \
+  -F 'extra_params={"task":"t2va","duration":10.0,"aspect_ratio":"16:9","flow_shift":12.0,"audio_flow_shift":3.0}'
+```
+
+Enable the native pipeline profiler on the same eight-GPU configuration for
+the diagnostic run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
+vllm serve "${MODEL}" \
+  --omni --host 0.0.0.0 --port "${PORT}" --trust-remote-code \
+  --task-type fl2va \
+  --num-gpus 8 --usp 8 --ring 1 --ulysses-a2a-permute \
+  --vae-patch-parallel-size 8 --vae-parallel-mode tile --vae-use-tiling \
+  --diffusion-attention-backend TRTLLM_ATTN \
+  --enable-diffusion-pipeline-profiler --log-stats \
+  2>&1 | tee vllm-omni-breakdown.log
+```
+
+The log contains the synchronized `DiffusionPipelineProfiler` timers,
+`RequestE2EStats`, `StageRequestStats`, and the MP4 encode-and-mux timer. The
+profiled request is diagnostic; the unprofiled client requests provide the
+headline latency. Nsight Systems verifies GPU work and transfers but does not
+replace these request-level timers.
 
 ### 2.3 Benchmark scope and deployment recipes
 
@@ -249,18 +304,21 @@ different base.
 
 ### 3.2 Fused DiT operators
 
-The dense DiT path removes repeated launch and memory traffic without changing
-its model or step count:
+The dense DiT path removes repeated launches, intermediate tensors, and layout
+materialization without changing the model or step count:
 
-- [fused RMSNorm and RoPE](https://github.com/vllm-project/vllm-omni/pull/5801)
-  replace model-local compositions with platform-dispatched diffusion ops;
+- [Fused Q/K RMSNorm and RoPE](https://github.com/vllm-project/vllm-omni/pull/5990)
+  fuses RMSNorm and RoPE into one kernel for Q and one for K.
 - [FP32 fused modulation](https://github.com/vllm-project/vllm-omni/pull/6281)
   combines gather, modulation, normalization, and residual work while retaining
-  FP32 accumulation;
-- [fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/6283) replaces
-  separate SiLU and multiply launches; and
-- strict Ulysses keeps the pre/post-transformer boundaries local while leaving
-  the Q/K/V all-to-all and attention math unchanged.
+  FP32 accumulation.
+- [Fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/6283) replaces
+  separate SiLU and multiply launches.
+- [Strict Ulysses boundaries](https://github.com/vllm-project/vllm-omni/pull/6173)
+  keep the pre/post-transformer boundaries rank-local.
+- [Fast Ulysses](https://github.com/vllm-project/vllm-omni/pull/6340)
+  exchanges shards directly into the attention layout, avoiding separate
+  permute and contiguous copies around the all-to-all.
 
 These changes are not summed from their individual PR benchmarks. The article
 measures the merged stack once, then uses isolated A/Bs only when the hardware,
@@ -340,12 +398,14 @@ and semantic quality instead of presenting SSIM/PSNR as numerical parity.
 
 | B300 runtime | Devices / placement / dense attention | Ready time | Encoder | Denoise total / 49 / per-forward | Video/audio VAE | Transport + MP4 | Complete E2E | Peak HBM / host RAM | Quality / artifacts |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| Diffusers | TBD | TBD | TBD | TBD / 49 / TBD | TBD / TBD | TBD | TBD | TBD / TBD | TBD |
-| vLLM-Omni | TBD | TBD | TBD | TBD / 49 / TBD | TBD / TBD | TBD | TBD | TBD / TBD | TBD |
+| Diffusers | 8× B300; resident `ModularPipeline`; replicated weights; Ulysses8, Ring1; dense BF16 | 30.895 s | Not isolated | Not isolated / 49 / not isolated | Not isolated | Not isolated | 82.239 s median; 80.702–84.572 s; CV 1.72% | 151.699 GiB peak rank / not recorded | Coherent 243-frame H.264/AAC output |
+| vLLM-Omni | 8× B300; encoder TP1; DiT DP1 × TP1 × USP8, Ring1 with Fast Ulysses; VAE PP8 tile; dense `TRTLLM_ATTN` | 168 s | 0.057 s | 51.800 s / 49 / 1.057 s | 0.952 s / 0.055 s | 1.528 s MP4 encode and mux | 58.371 s median; 58.259–58.484 s | 128.232 GiB peak rank / not recorded | Coherent 243-frame H.264/AAC output |
 
-Every populated row must link the exact commands, package manifest, resolved
-attention backend, raw samples, profiler source, generated-media hashes, and
-same-seed quality report.
+Both runtimes use the same prompt, seed, output shape, schedule, and eight-GPU
+budget. Generator draw-order parity is not established, so the comparison makes
+no pixelwise claim. vLLM-Omni is 1.409× faster by complete-response median.
+The raw commands, manifests, samples, logs, and generated media are retained
+outside the blog repository.
 
 ## 4. Acceleration paths with explicit quality or precision trade-offs
 
@@ -743,7 +803,7 @@ deployment.
      the final evidence and author list are agreed. -->
 
 This work builds on contributions across vLLM, vLLM-Omni, VeRL-Omni, MiniMax
-H3, FastH3, and Diffusers. We especially thank the
+H3, FastH3, Diffusers, and NVIDIA. We especially thank the
 [FastH3 team](https://haoailab.com/blogs/fasth3-preview/) for open-sourcing its
 four-step adapter and collaborating with the vLLM-Omni community on the merged
 serving integration. We also thank the contributors who implemented and
