@@ -502,10 +502,10 @@ kernel result.
 
 ### 4.3 Quantized and Sparse Attention with TRTLLM Attn Backend
 
-`TRTLLM_ATTN` supports [SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
+On datacenter Blackwell GPUs, MiniMax H3 uses dense BF16 `TRTLLM_ATTN` by
+default. The backend also supports two optional lossy acceleration modes:
+[SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
 and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax).
-The following A/B changes only the main DiT attention; the short token-refiner
-attention remains dense through `per_role`.
 
 | Attention policy | SAGE config | Skip-Softmax config | Model execution | Speedup | LPIPS vs. dense | Audio correlation vs. dense | Sample |
 |---|---|---|---:|---:|---:|---:|---|
