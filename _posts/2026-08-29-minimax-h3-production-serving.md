@@ -404,8 +404,8 @@ and semantic quality instead of presenting SSIM/PSNR as numerical parity.
 
 | B300 runtime | Prompt encode | DiT denoise | Video / audio VAE | MP4 encode + mux | Client E2E | Peak reserved HBM | Output |
 |---|---:|---:|---:|---:|---:|---:|---|
-| Diffusers | — | — | — | — | **82.239 s** median; 80.702–84.572 s; CV 1.72% | 151.699 GiB, peak rank | Coherent 243-frame H.264/AAC |
-| vLLM-Omni | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **58.371 s** median; 58.259–58.484 s | 128.232 GiB, peak rank | Coherent 243-frame H.264/AAC |
+| Diffusers | — | — | — | — | **82.239 s** | 151.699 GiB, peak rank | Coherent 243-frame H.264/AAC |
+| vLLM-Omni | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **58.371 s** | 128.232 GiB, peak rank | Coherent 243-frame H.264/AAC |
 
 Diffusers phase timings were not isolated. The vLLM-Omni phase values come from
 a separate diagnostic request and are nested measurements rather than terms to
