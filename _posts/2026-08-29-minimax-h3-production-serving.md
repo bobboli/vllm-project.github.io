@@ -272,48 +272,33 @@ bitwise identity: changing reduction order, attention kernels, or FP32
 accumulation can perturb a diffusion trajectory. Every row still needs the
 same media and quality gates.
 
-### 3.1 Dense attention, packed sequences, and Ulysses boundaries
+### 3.1 Long-sequence attention and communication
 
-H3 denoises one long packed text/audio/video sequence. vLLM-Omni preserves
-document boundaries with variable-length attention metadata and can select a
-platform-qualified dense backend without changing attention coverage. The
-[TRTLLM refinement](https://github.com/vllm-project/vllm-omni/pull/5779)
-trims structural padding before the kernel; the
-[strict-Ulysses optimization](https://github.com/vllm-project/vllm-omni/pull/6173)
-constructs rank-local input rows and gathers compact projected outputs instead
-of full hidden states.
+MiniMax H3 denoises text, audio, and video tokens as one long packed sequence.
+For the canonical workload, 58,758 valid tokens occupy a 58,816-token aligned
+buffer, and Ulysses distributes that sequence across eight GPUs. vLLM-Omni
+reduces unnecessary work at three boundaries:
 
-On B300, qualify dense `TRTLLM_ATTN`, cuDNN, and FA4 under one frozen topology
-and record the resolved kernel. Keep that backend choice explicit in the
-complete Diffusers/vLLM-Omni comparison so an engine result does not silently
-mix in a kernel change.
+- **Packed attention.** [PR #5779](https://github.com/vllm-project/vllm-omni/pull/5779)
+  passes the valid sequence lengths to `TRTLLM_ATTN` and removes structural
+  suffix padding before dense or quantized attention.
+- **Rank-local model boundaries.** [PR #6173](https://github.com/vllm-project/vllm-omni/pull/6173)
+  constructs only each rank's embedding and RoPE rows. After the transformer,
+  it gathers the compact 128-channel projection instead of the 5,376-channel
+  hidden state.
+- **Fast Ulysses transport.** [PR #6340](https://github.com/vllm-project/vllm-omni/pull/6340)
+  uses NCCL SymmetricMemory to exchange shards directly in the attention
+  layout, eliminating the separate relayout around the all-to-all. It is
+  enabled with `--ulysses-a2a-permute`.
 
-[PR #6340](https://github.com/vllm-project/vllm-omni/pull/6340) adds an
-orthogonal, opt-in Fast Ulysses transport through
-`--ulysses-a2a-permute`. For the strict scatter-heads/gather-sequence layout,
-it replaces regular Ulysses all-to-all plus explicit relayout with functional
-CUDA custom ops backed by NCCL SymmetricMemory. The attention math, packed
-documents, and selected dense backend remain unchanged.
-
-The merged implementation JIT-builds the extension during worker/model
-initialization, retains one grow-only workspace per device/process group,
-requires that workspace to stay on one CUDA stream, and releases it before the
-distributed environment is destroyed. A CUDA-graph deployment must warm its
-maximum request shape before capture because the workspace cannot grow during
-capture. Unsupported/non-strict layouts retain regular Ulysses.
-
-The H3 gain is workload-sensitive: the contributor's long-video A/B improved
-steady E2E by 1.36% with an 18.738-second additional warmup, while an
-[independent four-step A/B](https://github.com/vllm-project/vllm-omni/pull/6340#issuecomment-5466589923)
-reduced the diffusion stage by 8.8% with PSNR 35.3–39.4 dB and SSIM
-0.977–0.988. Attribute only the isolated diffusion delta, keep JIT/readiness
-separate, and do not add this gain to #6173 or attention-backend results from a
-different base.
+Together, these changes preserve dense attention while reducing padding,
+global tensor materialization, communication volume, and layout conversion.
 
 ### 3.2 Fused DiT operators
 
-The dense DiT path removes repeated launches, intermediate tensors, and layout
-materialization without changing the model or step count:
+The DiT repeatedly applies small elementwise operations around its matrix
+multiplications. Fusing those operations reduces kernel launches and avoids
+writing intermediate tensors to memory:
 
 - [Fused Q/K RMSNorm and RoPE](https://github.com/vllm-project/vllm-omni/pull/5990)
   fuses RMSNorm and RoPE into one kernel for Q and one for K.
@@ -322,76 +307,42 @@ materialization without changing the model or step count:
   FP32 accumulation.
 - [Fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/6283) replaces
   separate SiLU and multiply launches.
-- [Strict Ulysses boundaries](https://github.com/vllm-project/vllm-omni/pull/6173)
-  keep the pre/post-transformer boundaries rank-local.
-- [Fast Ulysses](https://github.com/vllm-project/vllm-omni/pull/6340)
-  exchanges shards directly into the attention layout, avoiding separate
-  permute and contiguous copies around the all-to-all.
 
-These changes are not summed from their individual PR benchmarks. The article
-measures the merged stack once, then uses isolated A/Bs only when the hardware,
-topology, workload, and base revision are identical.
+### 3.3 Parallel and fused VAE decoding
 
-### 3.3 VAE parallelism and exact eager kernels
+After denoising, H3 decodes video and audio latents independently. vLLM-Omni
+uses VAE patch parallelism to distribute the tiled video decoder across the
+eight GPUs. [PR #6607](https://github.com/vllm-project/vllm-omni/pull/6607)
+then accelerates repeated eager operations inside the video VAE: decoder-block
+weight materialization, fused Q/K normalization and RoPE, fused SwiGLU, and
+scaled residual updates. The optimized kernels preserve the reference results
+for their supported tensor layouts and fall back to the original operations
+elsewhere.
 
-At short denoising schedules, decode becomes a much larger fraction of request
-latency. H3 distributes native tiled video decode through VAE patch
-parallelism. The merged [exact eager operator path](https://github.com/vllm-project/vllm-omni/pull/6607)
-also accelerates Q/K normalization plus RoPE, SwiGLU, and scaled residuals on
-SM90, SM100, and SM103 while retaining guarded fallbacks. Report the video VAE
-critical path and audio VAE separately; an isolated decoder speedup is not an
-equal-sized end-to-end claim.
+This combination shortens the video-decoding critical path without coupling it
+to the independently executed audio VAE.
 
-### 3.4 Video output transport and CPU MP4 construction
+### 3.4 GPU-to-MP4 output path
 
-The merged lossless output path now reduces data before it optimizes CPU muxing:
+A generation request is not complete until hundreds of decoded frames have
+left the GPU and become an MP4. The original path transferred FP32 frames and
+performed several layout and dtype conversions on the CPU. The current path
+does each conversion once:
 
-1. [PR #6824](https://github.com/vllm-project/vllm-omni/pull/6824)
-   clamps, scales, and rounds decoded FP32 BCTHW frames on the GPU, combines
-   dtype plus BCTHW→BTHWC conversion into one contiguous uint8 allocation, and
-   avoids a redundant `torch.cat` for the common single-output case.
-2. The existing pinned D2H and worker-to-engine path transports the four-times
-   smaller uint8 payload. A subprocess boundary may still materialize a
-   C-interleaved array whose individual RGB planes are strided.
-3. [PR #6776](https://github.com/vllm-project/vllm-omni/pull/6776)
-   lets the server-owned parallel converter accept those strided RGB planes,
-   keeping transported output on the direct-planar route.
-4. The [direct planar encoder](https://github.com/vllm-project/vllm-omni/pull/6288)
-   plus [persistent eight-worker pool](https://github.com/vllm-project/vllm-omni/pull/6499)
-   converts frames in order and writes H.264/AAC without a second full
-   interleaved RGB buffer.
+1. [PR #6824](https://github.com/vllm-project/vllm-omni/pull/6824) converts
+   decoded FP32 BCTHW frames into contiguous uint8 BTHWC on the GPU, reducing
+   the video payload by 75% before transfer.
+2. The worker uses pinned memory to move that compact payload to the server.
+3. The [direct-planar encoder](https://github.com/vllm-project/vllm-omni/pull/6288),
+   [persistent conversion pool](https://github.com/vllm-project/vllm-omni/pull/6499),
+   and [strided-plane support](https://github.com/vllm-project/vllm-omni/pull/6776)
+   feed frames to H.264 encoding without constructing another full interleaved
+   RGB video buffer.
 
-The resulting chain is:
+`FP32 BCTHW on GPU → uint8 BTHWC → pinned D2H/IPC → parallel planar conversion → H.264/AAC MP4`
 
-`FP32 BCTHW on GPU → uint8 BTHWC → pinned D2H/IPC → parallel direct-planar frames → H.264/AAC MP4`
-
-Source evidence isolates both gains:
-
-- On 8× B300, [#6824](https://github.com/vllm-project/vllm-omni/pull/6824)
-  reduced the worker payload by 75% and steady inference from 22.578 to
-  21.683 seconds (−3.96%) with unchanged peak HBM and a byte-identical MP4.
-- In a 243-frame paired CPU benchmark,
-  [#6776](https://github.com/vllm-project/vllm-omni/pull/6776) reduced encoding
-  wall time from 2.430 to 1.422 seconds (−40.94%) while process CPU increased
-  9.02%; every output was byte-identical.
-
-#6776 merged first and #6824 merged directly on top of it, so current main
-contains both halves of the intended path. [PR #6764](https://github.com/vllm-project/vllm-omni/pull/6764)
-closed unmerged; default single-stage serving remains subprocess-based and no
-longer needs inline placement to reach direct-planar encoding. A fresh combined
-A/B on the frozen ten-second workload is still required before the blog fills
-its canonical vLLM-Omni result row.
-
-The online H.264/AAC response remains byte-identical in the submitted tests.
-The raw offline contract does change: callers that consume
-`OmniRequestOutput.images[0]` directly now receive contiguous uint8 `[0,255]`
-frames rather than float32 `[0,1]` frames and must branch on dtype.
-
-For Diffusers, the equivalent end boundary includes its caller-side
-`encode_video()`/mux step. For vLLM-Omni, it includes the complete non-streaming
-HTTP response. Report output-preparation time, payload bytes, transport wall
-time, MP4 wall/process CPU, peak RSS, chosen route, and CPU/NUMA placement
-rather than attributing transport or CPU gains to the DiT.
+The HTTP response remains the same H.264/AAC MP4; the optimization removes
+redundant copies and reduces the amount of data crossing the process boundary.
 
 ### 3.5 Diffusers versus vLLM-Omni A/B
 
