@@ -500,46 +500,29 @@ storage, latency, and same-seed video/audio metrics. A capacity win is not
 automatically a speed win, and a loader correctness result is not a fused
 kernel result.
 
-### 4.3 Sparse, skipped, and cached computation
+### 4.3 Quantized and Sparse Attention with TRTLLM Attn Backend
 
-These paths reduce or approximate attention/denoising work and therefore stay
-outside Section 3's lossless comparison:
+`TRTLLM_ATTN` supports [SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
+and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax).
+The following A/B changes only the main DiT attention; the short token-refiner
+attention remains dense through `per_role`.
 
-| Path | Current status | Boundary to report |
+| Attention policy | `dtype_qk` | `q_block_size` | `k_block_size` | `threshold` | `disabled_until_timestep` | Model execution | Speedup | LPIPS vs. dense | Audio correlation vs. dense | Sample |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Dense TRTLLM | — | — | — | — | — | 54.246 s | 1.000× | 0 | 1.000 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
+| SAGE FP8 | `fp8_e4m3` | 1 | 4 | — | — | 46.592 s | **1.164×** | 0.4093 | 0.956 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
+| Skip-Softmax | — | — | — | 0.05 | 0.97 | 50.029 s | **1.084×** | 0.0917 | 0.901 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
+| SAGE FP8 + Skip-Softmax | `fp8_e4m3` | 1 | 4 | 0.05 | 0.97 | 46.073 s | **1.177×** | 0.4103 | 0.868 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
+
+### 4.4 Other acceleration paths
+
+The attention and caching methods below are independent of `TRTLLM_ATTN`:
+
+| Path | Current status | Configuration and measurement boundary |
 |---|---|---|
-| [TRTLLM Skip-Softmax](https://github.com/vllm-project/vllm-omni/pull/5283) | Merged backend capability | Datacenter Blackwell only; threshold/sparsity, timestep gate, role overrides, dense baseline, and quality curve |
-| [TRTLLM SAGE](https://github.com/vllm-project/vllm-omni/pull/5509) | Merged backend capability | Q/K type and block sizes, V precision, dense token-refiner override, hardware/kernel version, and audio/video quality |
 | [Sol-Attn for H3](https://github.com/vllm-project/vllm-omni/pull/5851) | Preview | Report dense guards, `tau`, sink tokens, KV splits, and quality gates; use the hardware recipe for platform-specific setup |
 | [Dynamic Cache-DiT quality](https://github.com/vllm-project/vllm-omni/pull/5853) | Merged | `quality=lossless` removes the cache policy; `quality=high` installs the H3 profile and needs deployment-specific hit-rate/quality evidence |
 | FastH3 VSA variants | Rejected by the current FastH3 path | Sparse student artifacts require a VSA backend not implemented by that integration |
-
-SAGE and Skip-Softmax may be composed because they alter different parts of the
-same attention kernel, but their end-to-end gains must be measured together,
-not multiplied. Sol-Attn remains a separately labeled preview. Cache-DiT is a
-request policy, not a dense-kernel backend, and is incompatible with step
-execution.
-
-The B300 attention A/B holds the Section 3 workload and eight-GPU placement
-fixed. The short token-refiner attention stays dense through `per_role`; only
-the long main-DiT attention policy changes. Values are the mean of two measured
-requests after one warmup. The 0.97 gate enables Skip-Softmax for 35 of the 49
-DiT forwards.
-
-| Attention policy | SAGE Q/K | Skip-Softmax | Model execution | Speedup | Full-video LPIPS | Audio correlation | Sample |
-|---|---|---|---:|---:|---:|---:|---|
-| Dense TRTLLM | Off | Off | 54.246 s | 1.000× | 0 | 1.000 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
-| SAGE FP8 | E4M3, Q block 1, K block 4 | Off | 46.592 s | **1.164×** | 0.4093 | 0.956 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
-| Skip-Softmax | Off | Threshold 0.05, gate 0.97 | 50.029 s | **1.084×** | 0.0917 | 0.901 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
-| SAGE FP8 + Skip-Softmax | E4M3, Q block 1, K block 4 | Threshold 0.05, gate 0.97 | 46.073 s | **1.177×** | 0.4103 | 0.868 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
-
-LPIPS is the AlexNet mean over all 243 decoded RGB frames relative to Dense;
-audio correlation compares the complete decoded 32 kHz stereo AAC waveform.
-These are sample-specific measurements of deliberately lossy policies, not
-general quality guarantees. SAGE provides most of the combined speedup for this
-configuration and also produces most of its visual change; Skip-Softmax alone
-is the more conservative quality/performance point.
-
-### 4.4 Acceleration A/B summary
 
 Each row starts from the Section 3 lossless vLLM-Omni result on the same
 platform and changes one declared acceleration policy:
