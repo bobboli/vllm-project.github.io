@@ -195,11 +195,18 @@ engine work, and `diffusion_engine_exec_time_s` contains the model operations,
 so parent and child values are never added together. Divide the `diffuse` time
 by the observed DiT-forward count for the per-forward value.
 
+Attention acceleration A/Bs use `diffusion_engine_exec_time_s`. This boundary
+includes the model work surrounding attention while excluding output transfer,
+response formatting, and MP4 construction. The dense TRTLLM attention baseline
+is 54.246 seconds, averaged from two measured requests (54.185 and 54.306
+seconds). Profiler method timings such as `diffuse` are diagnostic children of
+that boundary and are not used as the A/B denominator.
+
 Each result also carries this compact placement manifest:
 
 | Profile | Encoder | DiT | Video/audio VAE | Output |
 |---|---|---|---|---|
-| TBD | Devices + TP/replicas/cache | Devices + TP/USP/Ring/DP/CFG/PP + offload/backend | Devices + VAE PP/mode/tiling + audio placement | Transport + CPU affinity/threads + mux path |
+| B300 attention A/B | 8 GPUs, text-encoder TP8, replicated vision tower | 8 GPUs, TP1, Ulysses8, Ring1, Fast Ulysses, BF16 `TRTLLM_ATTN` | VAE patch parallel 8, tile mode | Synchronous HTTP response, direct-planar MP4 path |
 
 #### Reproducing the vLLM-Omni measurements
 
@@ -402,17 +409,17 @@ implementations consume the same generator state, draw order, latent shapes,
 and scheduler grid. If that contract differs, report matched-prompt perceptual
 and semantic quality instead of presenting SSIM/PSNR as numerical parity.
 
-| B300 runtime | Prompt encode | DiT denoise | Video / audio VAE | MP4 encode + mux | Client E2E | Peak reserved HBM | Output |
-|---|---:|---:|---:|---:|---:|---:|---|
-| Diffusers | — | — | — | — | **82.239 s** | 151.699 GiB, peak rank | Coherent 243-frame H.264/AAC |
-| vLLM-Omni | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **58.371 s** | 128.232 GiB, peak rank | Coherent 243-frame H.264/AAC |
+| B300 runtime | Model execution | Prompt encode | DiT denoise | Video / audio VAE | MP4 encode + mux | Client E2E | Peak reserved HBM | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Diffusers | — | — | — | — | — | **82.239 s** | 151.699 GiB, peak rank | Coherent 243-frame H.264/AAC |
+| vLLM-Omni | **54.246 s dense A/B baseline** | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **56.917 s** | 128.232 GiB, peak rank | Coherent 243-frame H.264/AAC |
 
-Diffusers phase timings were not isolated. The vLLM-Omni phase values come from
-a separate diagnostic request and are nested measurements rather than terms to
-sum into E2E. Startup readiness is omitted because the two runs did not use a
-comparable startup boundary. Generator draw-order parity is not established,
-so the comparison makes no pixelwise claim. The raw commands, manifests,
-samples, logs, and generated media are retained outside the blog repository.
+Diffusers phase timings were not isolated. The vLLM-Omni model-execution value
+is the baseline for attention acceleration A/Bs. Its profiler phase values come
+from a separate diagnostic request and are nested measurements rather than
+terms to sum into E2E. Startup readiness is omitted because the two runtimes
+did not use a comparable startup boundary. Generator draw-order parity is not
+established, so the comparison makes no pixelwise claim.
 
 ## 4. Acceleration paths with explicit quality or precision trade-offs
 
@@ -511,6 +518,26 @@ not multiplied. Sol-Attn remains a separately labeled preview. Cache-DiT is a
 request policy, not a dense-kernel backend, and is incompatible with step
 execution.
 
+The B300 attention A/B holds the Section 3 workload and eight-GPU placement
+fixed. The short token-refiner attention stays dense through `per_role`; only
+the long main-DiT attention policy changes. Values are the mean of two measured
+requests after one warmup. The 0.97 gate enables Skip-Softmax for 35 of the 49
+DiT forwards.
+
+| Attention policy | SAGE Q/K | Skip-Softmax | Model execution | Speedup | Full-video LPIPS | Audio correlation | Sample |
+|---|---|---|---:|---:|---:|---:|---|
+| Dense TRTLLM | Off | Off | 54.246 s | 1.000× | 0 | 1.000 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
+| SAGE FP8 | E4M3, Q block 1, K block 4 | Off | 46.592 s | **1.164×** | 0.4093 | 0.956 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
+| Skip-Softmax | Off | Threshold 0.05, gate 0.97 | 50.029 s | **1.084×** | 0.0917 | 0.901 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
+| SAGE FP8 + Skip-Softmax | E4M3, Q block 1, K block 4 | Threshold 0.05, gate 0.97 | 46.073 s | **1.177×** | 0.4103 | 0.868 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
+
+LPIPS is the AlexNet mean over all 243 decoded RGB frames relative to Dense;
+audio correlation compares the complete decoded 32 kHz stereo AAC waveform.
+These are sample-specific measurements of deliberately lossy policies, not
+general quality guarantees. SAGE provides most of the combined speedup for this
+configuration and also produces most of its visual change; Skip-Softmax alone
+is the more conservative quality/performance point.
+
 ### 4.4 Acceleration A/B summary
 
 Each row starts from the Section 3 lossless vLLM-Omni result on the same
@@ -522,7 +549,6 @@ platform and changes one declared acceleration policy:
 | B300 / FastH3 | Fused artifact | 5 / 4 | Dense only | TBD | TBD | TBD | Merged / TBD |
 | B300 / online FP8 | Runtime FP8 | 50 / 49 | Dense TBD | TBD | TBD | TBD | Merged / TBD |
 | B300 / SVDQuant | Offline W4A4 + BF16 correction | 50 / 49 | Dense TBD | TBD | TBD | TBD | Correctness baseline / TBD |
-| B300 / SAGE or Skip-Softmax | BF16 weights | 50 / 49 | Exact policy TBD | TBD | TBD | TBD | Backend merged / TBD |
 
 ## 5. Production deployment features
 
