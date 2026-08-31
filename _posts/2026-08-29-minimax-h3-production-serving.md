@@ -271,11 +271,12 @@ cross-hardware comparisons:
 
 ## 3. Lossless runtime optimization
 
-Here, **lossless** means that the comparison keeps the released BF16 model,
-the 50-point schedule, and dense full-attention coverage. It does not promise
-bitwise identity: changing reduction order, attention kernels, or FP32
-accumulation can perturb a diffusion trajectory. Every row still needs the
-same media and quality gates.
+Before changing model precision or skipping computation, vLLM-Omni first
+removes systems overhead from the reference MiniMax H3 pipeline. The
+optimizations in this section keep the released BF16 weights, the 50-point
+schedule, and dense attention coverage; Section 4 covers methods that trade
+quality or precision for additional speed. We use **lossless** in this
+practical sense, not to claim bitwise-identical floating-point execution.
 
 ### 3.1 Long-sequence attention and communication
 
@@ -284,17 +285,17 @@ For the canonical workload, 58,758 valid tokens occupy a 58,816-token aligned
 buffer, and Ulysses distributes that sequence across eight GPUs. vLLM-Omni
 reduces unnecessary work at three boundaries:
 
-- **Packed attention.** [PR #5779](https://github.com/vllm-project/vllm-omni/pull/5779)
-  passes the valid sequence lengths to `TRTLLM_ATTN` and removes structural
-  suffix padding before dense or quantized attention.
-- **Rank-local model boundaries.** [PR #6173](https://github.com/vllm-project/vllm-omni/pull/6173)
-  constructs only each rank's embedding and RoPE rows. After the transformer,
-  it gathers the compact 128-channel projection instead of the 5,376-channel
-  hidden state.
-- **Fast Ulysses transport.** [PR #6340](https://github.com/vllm-project/vllm-omni/pull/6340)
-  uses NCCL SymmetricMemory to exchange shards directly in the attention
-  layout, eliminating the separate relayout around the all-to-all. It is
-  enabled with `--ulysses-a2a-permute`.
+- **Packed attention ([PR #5779](https://github.com/vllm-project/vllm-omni/pull/5779)).**
+  Valid sequence lengths are passed to `TRTLLM_ATTN`, and structural suffix
+  padding is removed before dense or quantized attention.
+- **Rank-local model boundaries ([PR #6173](https://github.com/vllm-project/vllm-omni/pull/6173)).**
+  Each rank constructs only its own embedding and RoPE rows. After the
+  transformer, the compact 128-channel projection is gathered instead of the
+  5,376-channel hidden state.
+- **Fast Ulysses transport ([PR #6340](https://github.com/vllm-project/vllm-omni/pull/6340)).**
+  NCCL SymmetricMemory exchanges shards directly in the attention layout,
+  eliminating the separate relayout around the all-to-all. It is enabled with
+  `--ulysses-a2a-permute`.
 
 Together, these changes preserve dense attention while reducing padding,
 global tensor materialization, communication volume, and layout conversion.
@@ -305,23 +306,23 @@ The DiT repeatedly applies small elementwise operations around its matrix
 multiplications. Fusing those operations reduces kernel launches and avoids
 writing intermediate tensors to memory:
 
-- [Fused Q/K RMSNorm and RoPE](https://github.com/vllm-project/vllm-omni/pull/5990)
-  fuses RMSNorm and RoPE into one kernel for Q and one for K.
-- [FP32 fused modulation](https://github.com/vllm-project/vllm-omni/pull/6281)
-  combines gather, modulation, normalization, and residual work while retaining
-  FP32 accumulation.
-- [Fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/6283) replaces
-  separate SiLU and multiply launches.
+- **Fused Q/K RMSNorm and RoPE ([PR #5990](https://github.com/vllm-project/vllm-omni/pull/5990)).**
+  RMSNorm and RoPE run in one kernel for Q and one for K.
+- **FP32 fused modulation ([PR #6281](https://github.com/vllm-project/vllm-omni/pull/6281)).**
+  Gather, modulation, normalization, and residual work are combined while
+  retaining FP32 accumulation.
+- **Fused SwiGLU ([PR #6283](https://github.com/vllm-project/vllm-omni/pull/6283)).**
+  Separate SiLU and multiply launches are replaced by one fused operation.
 
 ### 3.3 Parallel and fused VAE decoding
 
 After denoising, H3 decodes video and audio latents independently. vLLM-Omni
 uses VAE patch parallelism to distribute the tiled video decoder across the
-eight GPUs. [PR #6607](https://github.com/vllm-project/vllm-omni/pull/6607)
-then accelerates repeated eager operations inside the video VAE: decoder-block
+eight GPUs. The **exact VAE operator path ([PR #6607](https://github.com/vllm-project/vllm-omni/pull/6607))**
+accelerates repeated eager operations inside the video VAE: decoder-block
 weight materialization, fused Q/K normalization and RoPE, fused SwiGLU, and
-scaled residual updates. The optimized kernels preserve the reference results
-for their supported tensor layouts and fall back to the original operations
+scaled residual updates. Its optimized kernels preserve the reference results
+for supported tensor layouts and fall back to the original operations
 elsewhere.
 
 This combination shortens the video-decoding critical path without coupling it
@@ -334,15 +335,16 @@ left the GPU and become an MP4. The original path transferred FP32 frames and
 performed several layout and dtype conversions on the CPU. The current path
 does each conversion once:
 
-1. [PR #6824](https://github.com/vllm-project/vllm-omni/pull/6824) converts
-   decoded FP32 BCTHW frames into contiguous uint8 BTHWC on the GPU, reducing
+1. **GPU output packing ([PR #6824](https://github.com/vllm-project/vllm-omni/pull/6824)).**
+   Decoded FP32 BCTHW frames become contiguous uint8 BTHWC on the GPU, reducing
    the video payload by 75% before transfer.
-2. The worker uses pinned memory to move that compact payload to the server.
-3. The [direct-planar encoder](https://github.com/vllm-project/vllm-omni/pull/6288),
-   [persistent conversion pool](https://github.com/vllm-project/vllm-omni/pull/6499),
-   and [strided-plane support](https://github.com/vllm-project/vllm-omni/pull/6776)
-   feed frames to H.264 encoding without constructing another full interleaved
-   RGB video buffer.
+2. **Pinned transport.** The worker moves that compact payload to the server
+   through pinned host memory.
+3. **Parallel planar encoding ([PR #6288](https://github.com/vllm-project/vllm-omni/pull/6288),
+   [PR #6499](https://github.com/vllm-project/vllm-omni/pull/6499), and
+   [PR #6776](https://github.com/vllm-project/vllm-omni/pull/6776)).** Frames
+   feed directly into H.264 encoding without constructing another full
+   interleaved RGB video buffer.
 
 `FP32 BCTHW on GPU → uint8 BTHWC → pinned D2H/IPC → parallel planar conversion → H.264/AAC MP4`
 
