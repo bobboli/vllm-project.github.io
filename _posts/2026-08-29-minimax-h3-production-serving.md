@@ -152,10 +152,14 @@ from the two single-request repetitions.
 
 ### 2.2 Measurement methodology
 
+#### Headline latency
+
 The cross-runtime headline is client-visible latency: synchronous request
 submission through receipt of the complete MP4. Model download, checkpoint
 conversion, compilation, startup, and warmup remain outside that interval.
 Diffusers reports this E2E value only.
+
+#### vLLM-Omni timing hierarchy
 
 For diagnosis, vLLM-Omni exposes a hierarchy of native timing boundaries:
 
@@ -195,20 +199,21 @@ engine work, and `diffusion_engine_exec_time_s` contains the model operations,
 so parent and child values are never added together. Divide the `diffuse` time
 by the observed DiT-forward count for the per-forward value.
 
+#### Attention A/B boundary
+
 Attention acceleration A/Bs use `diffusion_engine_exec_time_s`. This boundary
 includes the model work surrounding attention while excluding output transfer,
-response formatting, and MP4 construction. The dense TRTLLM attention baseline
-is 54.246 seconds, averaged from two measured requests (54.185 and 54.306
-seconds). Profiler method timings such as `diffuse` are diagnostic children of
-that boundary and are not used as the A/B denominator.
+response formatting, and MP4 construction. Profiler method timings such as
+`diffuse` are diagnostic children of that boundary and are not used as the A/B
+denominator.
+
+#### B300 placement and reproduction
 
 Each result also carries this compact placement manifest:
 
 | Profile | Encoder | DiT | Video/audio VAE | Output |
 |---|---|---|---|---|
 | B300 attention A/B | 8 GPUs, text-encoder TP8, replicated vision tower | 8 GPUs, TP1, Ulysses8, Ring1, Fast Ulysses, BF16 `TRTLLM_ATTN` | VAE patch parallel 8, tile mode | Synchronous HTTP response, direct-planar MP4 path |
-
-#### Reproducing the vLLM-Omni measurements
 
 The server remains resident for one excluded full-shape warmup and the measured
 requests. The external client boundary is:
@@ -454,11 +459,14 @@ kernel result.
 ### 4.3 Quantized and Sparse Attention with TRTLLM Attn Backend
 
 On datacenter Blackwell GPUs, MiniMax H3 uses dense BF16 `TRTLLM_ATTN` by
-default. The backend also supports two optional lossy acceleration modes. SAGE
-quantizes both the QK and PV paths to FP8. Skip-Softmax uses the QK result to
-dynamically skip unnecessary Softmax and PV computation. We evaluate a
-conservative Skip-Softmax configuration that largely preserves the generated
-video's visual quality. See the [SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
+default. The backend also supports two optional lossy acceleration modes:
+
+- **SAGE** quantizes both the QK and PV paths to FP8.
+- **Skip-Softmax** uses the QK result to dynamically skip unnecessary Softmax
+  and PV computation.
+
+We evaluate a conservative Skip-Softmax configuration that largely preserves
+the generated video's visual quality. See the [SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
 and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax)
 documentation for configuration details.
 
