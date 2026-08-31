@@ -507,12 +507,12 @@ and [Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user
 The following A/B changes only the main DiT attention; the short token-refiner
 attention remains dense through `per_role`.
 
-| Attention policy | `dtype_qk` | `q_block_size` | `k_block_size` | `threshold` | `disabled_until_timestep` | Model execution | Speedup | LPIPS vs. dense | Audio correlation vs. dense | Sample |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Dense TRTLLM | — | — | — | — | — | 54.246 s | 1.000× | 0 | 1.000 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
-| SAGE FP8 | `fp8_e4m3` | 1 | 4 | — | — | 46.592 s | **1.164×** | 0.4093 | 0.956 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
-| Skip-Softmax | — | — | — | 0.05 | 0.97 | 50.029 s | **1.084×** | 0.0917 | 0.901 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
-| SAGE FP8 + Skip-Softmax | `fp8_e4m3` | 1 | 4 | 0.05 | 0.97 | 46.073 s | **1.177×** | 0.4103 | 0.868 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
+| Attention policy | SAGE config | Skip-Softmax config | Model execution | Speedup | LPIPS vs. dense | Audio correlation vs. dense | Sample |
+|---|---|---|---:|---:|---:|---:|---|
+| Dense TRTLLM | Off | Off | 54.246 s | 1.000× | 0 | 1.000 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/trtllm_dense.mp4) |
+| SAGE FP8 | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=4` | Off | 46.592 s | **1.164×** | 0.4093 | 0.956 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_k4.mp4) |
+| Skip-Softmax | Off | `threshold=0.05`, `disabled_until_timestep=0.97` | 50.029 s | **1.084×** | 0.0917 | 0.901 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
+| SAGE FP8 + Skip-Softmax | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=4` | `threshold=0.05`, `disabled_until_timestep=0.97` | 46.073 s | **1.177×** | 0.4103 | 0.868 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
 
 ### 4.4 Other acceleration paths
 
