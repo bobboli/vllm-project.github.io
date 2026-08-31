@@ -410,10 +410,10 @@ implementations consume the same generator state, draw order, latent shapes,
 and scheduler grid. If that contract differs, report matched-prompt perceptual
 and semantic quality instead of presenting SSIM/PSNR as numerical parity.
 
-| B300 runtime | Model execution | Prompt encode | DiT denoise | Video / audio VAE | MP4 encode + mux | Client E2E | Peak reserved HBM |
+| B300 runtime | Model execution (s) | Prompt encode (s) | DiT denoise, total / per step (s) | Video / audio VAE (s) | MP4 encode + mux (s) | Client E2E (s) | Peak reserved HBM (GiB) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Diffusers | — | — | — | — | — | **82.239 s** | 151.699 GiB, peak rank |
-| vLLM-Omni | **54.246 s dense A/B baseline** | 0.057 s | 51.800 s total; 49 forwards; 1.057 s/forward | 0.952 s / 0.055 s | 1.528 s | **56.917 s** | 128.232 GiB, peak rank |
+| Diffusers | — | — | — | — | — | **82.239** | 151.699 |
+| vLLM-Omni | **54.246** | 0.057 | 51.800 / 1.057 | 0.952 / 0.055 | 1.528 | **56.917** | 128.232 |
 
 Diffusers phase timings were not isolated. The vLLM-Omni model-execution value
 is the baseline for attention acceleration A/Bs. Its profiler phase values come
