@@ -234,6 +234,7 @@ vllm serve "${MODEL}" \
   --omni --host 0.0.0.0 --port "${PORT}" --trust-remote-code \
   --task-type fl2va \
   --num-gpus 8 --usp 8 --ring 1 --ulysses-a2a-permute \
+  --text-encoder-tp-size 8 \
   --vae-patch-parallel-size 8 --vae-parallel-mode tile --vae-use-tiling \
   --diffusion-attention-backend TRTLLM_ATTN \
   --enable-diffusion-pipeline-profiler --log-stats \
@@ -398,11 +399,11 @@ Both runtimes use eight B300 GPUs, the same prompt and seed, 50 sigma points,
 and the same complete-MP4 timing boundary. Diffusers keeps one resident
 `ModularPipeline`, replicates the weights across eight ranks, and uses native
 context parallelism with Ulysses8, Ring1, and dense BF16 attention. vLLM-Omni
-uses encoder TP1, DiT USP8 with Ring1 and Fast Ulysses, VAE PP8 tile decode, and
-dense `TRTLLM_ATTN`.
+uses text-encoder TP8, DiT USP8 with Ring1 and Fast Ulysses, VAE PP8 tile
+decode, and dense `TRTLLM_ATTN`.
 
-vLLM-Omni completes the request in 58.371 seconds versus 82.239 seconds for
-Diffusers: 29.0% lower latency, or a 1.409× complete-response speedup.
+vLLM-Omni completes the request in 56.917 seconds versus 82.239 seconds for
+Diffusers: 30.8% lower latency, or a 1.445× complete-response speedup.
 
 Before using pixelwise or waveform metrics across runtimes, verify that both
 implementations consume the same generator state, draw order, latent shapes,
