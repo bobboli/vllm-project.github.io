@@ -334,8 +334,7 @@ successful generation, not pixelwise equivalence to BF16.
 Skip-Softmax uses the [BLASST](https://arxiv.org/abs/2512.12087) tile-level
 decision to bypass selected Softmax and P×V tiles.*
 
-The following table compares both modes and their combination with dense
-TRTLLM attention on the same B300 base-H3 workload:
+All four attention configurations use the same B300 base-H3 workload:
 
 | Attention policy | SAGE configuration | Skip-Softmax configuration | Model execution | Speedup | LPIPS vs. dense | Sample |
 |---|---|---|---:|---:|---:|---|
