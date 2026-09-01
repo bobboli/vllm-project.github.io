@@ -344,7 +344,8 @@ TRTLLM attention on the same B300 base-H3 workload:
 | Skip-Softmax | Off | threshold 0.05; disabled until 0.97 | 50.029 s | **1.084x** | 0.0917 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/skip_softmax_005_gate097.mp4) |
 | SAGE + Skip-Softmax | `dtype_qk=fp8_e4m3`, `q_block_size=1`, `k_block_size=16` | threshold 0.05; disabled until 0.97 | 43.867 s | **1.237x** | 0.3750 | [Video](/assets/figures/2026-08-29-minimax-h3-production-serving/evidence/b300/sage_fp8_skip_005_gate097.mp4) |
 
-The measured Skip-Softmax configuration is intentionally **conservative**.
+The measured Skip-Softmax configuration is **conservative** for preserving
+video quality.
 Users can choose a higher threshold or enable Skip-Softmax for more denoising
 steps to trade quality for additional speed. The
 [TRTLLM attention guide](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md)
